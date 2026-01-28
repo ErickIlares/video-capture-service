@@ -7,6 +7,7 @@ import io
 
 app = FastAPI(title="Video Capture Service")
 
+
 class CaptureRequest(BaseModel):
     url_video: str
 
@@ -40,12 +41,14 @@ def health():
     return {
         "status": "ok",
         "service": "video-capture",
-        "version": "2.0.0"
+        "version": "2.1.0"
     }
 
 
 @app.post("/capturar")
 def capturar(data: CaptureRequest):
+    screenshot_bytes = None
+
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -69,7 +72,7 @@ def capturar(data: CaptureRequest):
             page = context.new_page()
             page.goto(data.url_video, timeout=60000)
 
-            # Espera y scroll suave para Render
+            # Espera y scroll (clave en Render Free)
             page.wait_for_timeout(4000)
             page.mouse.wheel(0, 1200)
             page.wait_for_timeout(3000)
@@ -77,6 +80,7 @@ def capturar(data: CaptureRequest):
             screenshot_bytes = page.screenshot(full_page=False)
             browser.close()
 
+        # Procesar imagen
         image = Image.open(io.BytesIO(screenshot_bytes))
         image = normalizar_imagen(image)
 
@@ -91,12 +95,32 @@ def capturar(data: CaptureRequest):
         }
 
     except TimeoutError:
+        # Timeout real (no se pudo cargar nada)
         return {
             "status": "error",
             "reason": "La página no respondió a tiempo"
         }
 
     except Exception:
+        # FALLBACK FINAL: si hubo screenshot, úsalo igual
+        if screenshot_bytes:
+            try:
+                image = Image.open(io.BytesIO(screenshot_bytes))
+                image = normalizar_imagen(image)
+
+                buffer = io.BytesIO()
+                image.save(buffer, format="JPEG", quality=85, optimize=True)
+
+                image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+                return {
+                    "status": "success",
+                    "image_base64": image_base64
+                }
+            except Exception:
+                pass
+
+        # Si no hubo absolutamente nada
         return {
             "status": "error",
             "reason": "No se pudo generar la captura"
