@@ -1,8 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from playwright.sync_api import sync_playwright, TimeoutError
 from PIL import Image
-import requests
-from bs4 import BeautifulSoup
 import base64
 import io
 
@@ -13,65 +12,75 @@ class CaptureRequest(BaseModel):
     url_video: str
 
 
-def imagen_placeholder() -> str:
-    img = Image.new("RGB", (1280, 720), (240, 240, 240))
+def placeholder(text: str = "Contenido no disponible") -> str:
+    img = Image.new("RGB", (1280, 720), (40, 40, 40))
     buffer = io.BytesIO()
     img.save(buffer, format="JPEG", quality=85)
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
-def descargar_y_normalizar_imagen(url: str) -> str | None:
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-
-        img = Image.open(io.BytesIO(r.content)).convert("RGB")
-        img = img.resize((1280, 720), Image.LANCZOS)
-
-        buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=85)
-
-        return base64.b64encode(buffer.getvalue()).decode("utf-8")
-    except Exception:
-        return None
+def normalizar(img: Image.Image) -> str:
+    img = img.convert("RGB").resize((1280, 720), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "service": "video-capture",
-        "version": "4.1.0"
-    }
+    return {"status": "ok", "service": "video-capture"}
 
 
 @app.post("/capturar")
 def capturar(data: CaptureRequest):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        html = requests.get(data.url_video, headers=headers, timeout=10).text
-        soup = BeautifulSoup(html, "html.parser")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
 
-        # 1️⃣ og:image (principal)
-        meta = soup.find("meta", property="og:image")
+            context = browser.new_context(
+                viewport={"width": 390, "height": 844},  # 📱 mobile
+                user_agent=(
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                    "Version/17.0 Mobile/15E148 Safari/604.1"
+                ),
+            )
 
-        # 2️⃣ twitter:image (fallback)
-        if not meta:
-            meta = soup.find("meta", attrs={"name": "twitter:image"})
+            page = context.new_page()
+            page.goto(data.url_video, wait_until="domcontentloaded", timeout=60000)
 
-        if meta and meta.get("content"):
-            image_base64 = descargar_y_normalizar_imagen(meta["content"])
-            if image_base64:
+            # Espera a que aparezca el contenedor visual del post
+            try:
+                page.wait_for_selector("article, video, img", timeout=10000)
+            except TimeoutError:
+                browser.close()
                 return {
                     "status": "success",
-                    "image_base64": image_base64
+                    "image_base64": placeholder("Post no visible"),
                 }
-    except Exception:
-        pass
 
-    # 3️⃣ Placeholder final (nunca falla)
-    return {
-        "status": "success",
-        "image_base64": imagen_placeholder()
-    }
+            page.wait_for_timeout(3000)
+            page.mouse.wheel(0, 1200)
+            page.wait_for_timeout(2000)
+
+            screenshot = page.screenshot(full_page=False)
+            browser.close()
+
+        image = Image.open(io.BytesIO(screenshot))
+        return {
+            "status": "success",
+            "image_base64": normalizar(image),
+        }
+
+    except Exception:
+        return {
+            "status": "success",
+            "image_base64": placeholder("Error de captura"),
+        }
