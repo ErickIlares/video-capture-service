@@ -1,9 +1,10 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from playwright.sync_api import sync_playwright, TimeoutError
-from PIL import Image
+import requests
+from bs4 import BeautifulSoup
 import base64
 import io
+from PIL import Image
 
 app = FastAPI(title="Video Capture Service")
 
@@ -12,15 +13,8 @@ class CaptureRequest(BaseModel):
     url_video: str
 
 
-def placeholder(text: str = "Contenido no disponible") -> str:
-    img = Image.new("RGB", (1280, 720), (40, 40, 40))
-    buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=85)
-    return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-
-def normalizar(img: Image.Image) -> str:
-    img = img.convert("RGB").resize((1280, 720), Image.LANCZOS)
+def placeholder_base64() -> str:
+    img = Image.new("RGB", (1280, 720), (60, 60, 60))
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -28,59 +22,47 @@ def normalizar(img: Image.Image) -> str:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "video-capture"}
+    return {
+        "status": "ok",
+        "service": "video-capture",
+        "mode": "og-image"
+    }
 
 
 @app.post("/capturar")
 def capturar(data: CaptureRequest):
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                ],
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120 Safari/537.36"
             )
+        }
 
-            context = browser.new_context(
-                viewport={"width": 390, "height": 844},  # 📱 mobile
-                user_agent=(
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                    "Version/17.0 Mobile/15E148 Safari/604.1"
-                ),
-            )
+        response = requests.get(data.url_video, headers=headers, timeout=15)
+        response.raise_for_status()
 
-            page = context.new_page()
-            page.goto(data.url_video, wait_until="domcontentloaded", timeout=60000)
+        soup = BeautifulSoup(response.text, "html.parser")
+        og_image = soup.find("meta", property="og:image")
 
-            # Espera a que aparezca el contenedor visual del post
-            try:
-                page.wait_for_selector("article, video, img", timeout=10000)
-            except TimeoutError:
-                browser.close()
-                return {
-                    "status": "success",
-                    "image_base64": placeholder("Post no visible"),
-                }
+        if not og_image or not og_image.get("content"):
+            return {
+                "status": "success",
+                "image_base64": placeholder_base64()
+            }
 
-            page.wait_for_timeout(3000)
-            page.mouse.wheel(0, 1200)
-            page.wait_for_timeout(2000)
+        image_url = og_image["content"]
+        img_response = requests.get(image_url, headers=headers, timeout=15)
+        img_response.raise_for_status()
 
-            screenshot = page.screenshot(full_page=False)
-            browser.close()
-
-        image = Image.open(io.BytesIO(screenshot))
         return {
             "status": "success",
-            "image_base64": normalizar(image),
+            "image_base64": base64.b64encode(img_response.content).decode("utf-8")
         }
 
     except Exception:
         return {
             "status": "success",
-            "image_base64": placeholder("Error de captura"),
+            "image_base64": placeholder_base64()
         }
