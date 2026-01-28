@@ -13,13 +13,19 @@ class CaptureRequest(BaseModel):
 
 
 def imagen_placeholder() -> str:
-    img = Image.new("RGB", (1280, 720), (30, 30, 30))
+    """
+    Imagen de respaldo cuando no se puede renderizar contenido real.
+    """
+    img = Image.new("RGB", (1280, 720), (240, 240, 240))
     buffer = io.BytesIO()
     img.save(buffer, format="JPEG", quality=85)
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
 def normalizar_imagen(img: Image.Image) -> Image.Image:
+    """
+    Normaliza a 1280x720, fondo blanco.
+    """
     img = img.convert("RGB")
     return img.resize((1280, 720), Image.LANCZOS)
 
@@ -29,7 +35,7 @@ def health():
     return {
         "status": "ok",
         "service": "video-capture",
-        "version": "3.0.0"
+        "version": "3.1.0"
     }
 
 
@@ -41,11 +47,15 @@ def capturar(data: CaptureRequest):
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled"
+                ]
             )
 
             context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
+                viewport={"width": 1280, "height": 900},  # más vertical
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -54,17 +64,29 @@ def capturar(data: CaptureRequest):
             )
 
             page = context.new_page()
-            page.goto(data.url_video, timeout=60000)
+            page.goto(data.url_video, timeout=60000, wait_until="domcontentloaded")
 
-            page.wait_for_timeout(5000)
+            # 🔑 Forzar fondo blanco (evita pantallas negras)
+            page.add_style_tag(content="""
+                html, body {
+                    background: white !important;
+                }
+            """)
+
+            # Esperas reales (Render + redes sociales)
+            page.wait_for_timeout(8000)
             page.mouse.wheel(0, 1500)
             page.wait_for_timeout(3000)
 
-            screenshot_bytes = page.screenshot()
+            screenshot_bytes = page.screenshot(
+                full_page=False,
+                animations="disabled"
+            )
+
             browser.close()
 
     except Exception:
-        # Ignoramos cualquier error de Playwright
+        # No rompemos el flujo
         pass
 
     # 🔑 SI HAY SCREENSHOT → USARLO
@@ -83,7 +105,7 @@ def capturar(data: CaptureRequest):
         except Exception:
             pass
 
-    # 🔑 SI NO HAY SCREENSHOT → PLACEHOLDER
+    # 🔑 SI TODO FALLA → PLACEHOLDER (NUNCA BLOQUEA)
     return {
         "status": "success",
         "image_base64": imagen_placeholder()
