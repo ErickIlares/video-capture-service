@@ -7,87 +7,8 @@ import io
 
 app = FastAPI(title="Video Capture Service")
 
-# -------------------------
-# MODELOS
-# -------------------------
 class CaptureRequest(BaseModel):
     url_video: str
-
-
-# -------------------------
-# UTILIDADES
-# -------------------------
-def detectar_plataforma(url: str) -> str:
-    url = url.lower()
-    if "instagram.com" in url:
-        return "instagram"
-    if "tiktok.com" in url:
-        return "tiktok"
-    if "facebook.com" in url or "fb.watch" in url:
-        return "facebook"
-    return "unknown"
-
-
-def detectar_error_contenido(texto: str, plataforma: str) -> str:
-    texto = texto.lower()
-
-    if plataforma == "instagram":
-        if "login" in texto:
-            return "El contenido requiere iniciar sesión"
-        if "no disponible" in texto or "page isn't available" in texto:
-            return "El video fue eliminado o no existe"
-        if "privado" in texto:
-            return "El video es privado"
-
-    if plataforma == "tiktok":
-        if "no longer available" in texto or "video unavailable" in texto:
-            return "El video fue eliminado"
-        if "private" in texto:
-            return "El contenido es privado"
-
-    if plataforma == "facebook":
-        if "content not available" in texto:
-            return "El video fue eliminado"
-        if "privacy" in texto or "not public" in texto:
-            return "El contenido no es público"
-        if "login" in texto:
-            return "El contenido requiere iniciar sesión"
-
-    if "video_not_found" in texto or "video_not_visible" in texto:
-        return "No se pudo detectar el video"
-
-    return "No se pudo generar la captura"
-
-
-def esperar_frame_estable(page):
-    page.evaluate("""
-        () => {
-            const video = document.querySelector('video');
-            if (video) {
-                video.muted = true;
-                video.play().catch(() => {});
-            }
-        }
-    """)
-
-
-def screenshot_video(page):
-    video = page.query_selector("video")
-    if not video:
-        raise Exception("video_not_found")
-
-    box = video.bounding_box()
-    if not box:
-        raise Exception("video_not_visible")
-
-    return page.screenshot(
-        clip={
-            "x": box["x"],
-            "y": box["y"],
-            "width": box["width"],
-            "height": box["height"]
-        }
-    )
 
 
 def normalizar_imagen(img: Image.Image) -> Image.Image:
@@ -114,22 +35,17 @@ def normalizar_imagen(img: Image.Image) -> Image.Image:
     return background
 
 
-# -------------------------
-# ENDPOINTS
-# -------------------------
 @app.get("/health")
 def health():
     return {
         "status": "ok",
         "service": "video-capture",
-        "version": "1.0.0"
+        "version": "2.0.0"
     }
 
 
 @app.post("/capturar")
 def capturar(data: CaptureRequest):
-    plataforma = detectar_plataforma(data.url_video)
-
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -153,16 +69,12 @@ def capturar(data: CaptureRequest):
             page = context.new_page()
             page.goto(data.url_video, timeout=60000)
 
-            page.wait_for_selector("video", timeout=10000)
-            esperar_frame_estable(page)
-            page.wait_for_timeout(2000)
+            # Espera y scroll suave para Render
+            page.wait_for_timeout(4000)
+            page.mouse.wheel(0, 1200)
+            page.wait_for_timeout(3000)
 
-            try:
-                screenshot_bytes = screenshot_video(page)
-            except Exception:
-                page.wait_for_timeout(2000)
-                screenshot_bytes = screenshot_video(page)
-
+            screenshot_bytes = page.screenshot(full_page=False)
             browser.close()
 
         image = Image.open(io.BytesIO(screenshot_bytes))
@@ -184,9 +96,9 @@ def capturar(data: CaptureRequest):
             "reason": "La página no respondió a tiempo"
         }
 
-    except Exception as e:
-        reason = detectar_error_contenido(str(e), plataforma)
+    except Exception:
         return {
             "status": "error",
-            "reason": reason
+            "reason": "No se pudo generar la captura"
         }
+
